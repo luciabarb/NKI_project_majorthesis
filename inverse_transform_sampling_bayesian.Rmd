@@ -1,0 +1,394 @@
+---
+title: "L1000_Bayesian_v2"
+author: "Lucia Barbadilla"
+date: "11/3/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+##Extract specific files from L1000 BAYESIAN APPROACH
+library(rmarkdown)
+#library(sfsmisc)
+library(matrixStats)
+#library(ulimit)
+library(rhdf5)
+library(abind)
+library(Rfast)
+library(dplyr)
+library(tidyr)
+```
+
+
+
+.h5 files are obtained from https://github.com/njpipeorgan/L1000-bayesian, 
+
+only the one of interest were unzip
+In each .h5 files there are all the samples within a plate
+Only extract the ones of interest
+  
+##QUANTILE NORMALIZATION
+
+```{r Basic function, echo=FALSE}
+sum_logs <- function(p){
+  #Same function as logsum corrcoverage package
+  sums <- rep(NULL,length(p))
+  
+  for (i in 1:(length(p))){
+                          sums[i] <- exp(p[i] - max(p))}
+  
+  log_sum <-max(p) + log(sum(sums))
+  
+  return(log_sum)}
+
+sum_logs <- function(p){
+                      #Same function as logsum corrcoverage package
+                      
+                      log_sum <-max(p) + log(sum(exp(p - max(p))))
+                      
+                      return(log_sum)}
+
+trapzoid <- function(x,p){
+            area <- (p[1]+p[2])*(x[2]-x[1])/2
+            return(area)
+  
+}
+
+linear_regression <- function(x,y,x_point){
+                    
+                    m=(max(y)-min(y))/(max(x)-min(x))
+                    n=-m*max(x)+max(y)
+                    
+                    y_out=m*x_point+n
+                    
+                    return(y_out)
+                    
+                    
+}
+```
+
+```{r CDF, inverse sampling , CDF norm, echo=FALSE}
+CDF <- function(p,x){
+  
+  integral_slices <- rep(0,length(p)-1)
+  
+  for (i in 1:(length(p)-1)){
+    integral_slices[i+1] = trapzoid(x[i:(i+1)],p[i:(i+1)])
+  }
+  
+  CDF_vector <- cumsum(integral_slices)
+  
+  return(CDF_vector)
+}
+
+inverse_CDF_sampling <- function(n,p,x){
+  p <- exp(p)
+  CDF_vector <- CDF(p,x)
+  normalized_CDF <- CDF_vector/max(CDF_vector)
+  
+  data_CDF <- data.frame('CDF'=normalized_CDF,'x'=x)
+  
+  #Draw random samples from U(0,1)
+  samples <-runif(n,0,1) 
+  
+  x_samples <- rep(NA,length(samples))
+  
+  for (id_sample in 1:length(samples)){
+    sample <- samples[id_sample]
+    
+    #If all values of the probability distribution are 0, just return 0 
+    
+      #Check which position is the value sampled and find the CDF values in between
+      position <- findInterval(sample,normalized_CDF)
+      
+      
+      #Interpolate between these two points for this sample
+      
+      interpolate_points <- data_CDF[c(position,(position+1)),] 
+      
+      
+      x_samples[id_sample] <- linear_regression(x=interpolate_points$CDF, 
+                                                y=interpolate_points$x, 
+                                                sample)
+      
+      
+      
+    
+    
+  }
+  return(x_samples)
+  
+  
+}
+
+CDF_norm <- function(x_samples,CDF_values,x){
+  
+  
+  p_quantnorm_values <- rep(NA,length(x_samples))
+  
+  data_CDF <- data.frame('CDF'=CDF_values,'x'=x)
+  
+  for (id_x_sample in 1:length(x_samples)){#If that log2expression value is found already in the x values
+    
+    x_sample <- x_samples[id_x_sample]
+    
+    if (x_sample %in% x){
+      
+      p_quantnorm_values[id_x_sample] <- data_CDF %>% filter (x %in% x_sample) %>% .[['CDF']]
+      
+    }
+    
+    #If that p-value is not in the list
+    else {
+      #Check which position is the value sampled and find the CDF values in between
+      position <- findInterval(x_sample,x)
+      
+      
+      #Interpolate between these two points for our sample
+      interpolate_points <- data_CDF[c(position,(position+1)),] 
+      
+      p_quantnorm_values[id_x_sample] <- linear_regression(x=interpolate_points$x, 
+                                                y=interpolate_points$CDF, 
+                                                x_sample)
+      
+        
+      }
+    
+  }
+  return(p_quantnorm_values)
+}
+```
+
+
+```{r Run QN for each sample in a h5 file, echo=FALSE}
+loglikelihood_sample <- function(array_loglike,vector_log2_exp, n,id_samples,file){
+  
+      ########### Perform this analysis for each biological sample in the array file
+      ###Create an empty dimensional array where the 
+      array_samples <- NULL
+      experiment_id <- experiment_name(id_samples)
+      id_biosample <-0
+      
+      for (sample in 1:dim(array_loglike)[3]){  # Do this for each sample of the plate 
+      
+      id_biosample<-id_biosample+1
+      print(paste('Biological sample: ',id_biosample))
+  
+      likelihood_sample <- -0.001*array_loglike[,,sample]
+      
+      for (i in c(619,438,558,231)){
+                data_table <- data.frame(log2_FI=vector_log2_exp, likelihood=likelihood_sample[,i])
+                g <- ggplot(data_table, aes(x=log2_FI, y=likelihood)) + 
+                  geom_point()+
+                  theme_classic() + ggtitle(experiment_id[id_biosample]) +
+                   ylab('Log-likelihood') + xlab('Log2 fluorescent intensity')
+                
+                plot(g)}
+      
+      
+      
+      
+      ########### INVERSE TRANSFORM SAMPLING. FOR EACH GENE IN P(x) DRAW N statistical SAMPLES,
+        ######### samples_px:  MATRIX, n statistical SAMPLES x GENES
+      
+      print('Inverse transform sampling ------------------')
+      samples_px <- likelihood_sample %>% apply(2,function(x_gene)
+                    {inverse_CDF_sampling(n,x_gene,vector_log2_exp)})
+      
+      print('DONE')
+      
+      "for (i in c(619,438,558,231)){
+        plot(density(samples_px[,i], bw='SJ', from=-5, to=20), ylab=as.character(i),
+             main=experiment_id[id_biosample]) }"
+      
+      ########### OBTAIN THE P_AVERAGE OF ALL X GENES 
+        ########## p_average_scaled: VECTOR, GENES
+      
+      p_average <- likelihood_sample %>% apply(1,function(x){(sum(exp(x))/dim(likelihood_sample)[2])})
+      
+      
+      
+      
+      
+      ########### OBTAIN THE CDF of p_average
+        ######### p_average_CDF_scaled: VECTOR, GENES
+      
+      
+      p_average_CDF <- CDF(p_average,vector_log2_exp)
+      p_average_CDF_norm <- p_average_CDF/max(p_average_CDF)
+      
+      #plot(vector_log2_exp,p_average_CDF)
+      #plot(vector_log2_exp,p_average_CDF_norm)
+      
+      
+      
+      
+      ########### For each of the statistical samples obtained in INVERSE TRANSFORM SAMPLING, OBTAIN THE 
+        #########  CDF normalized values, by obtaining them from the CDF of p_average
+        #########   normalized_samples: matrix,  genes x n  statistical samples
+      
+      print('OBTAIN NORMALIZED VALUES---------')
+      normalized_samples <- samples_px %>% apply(1,function(y){return(CDF_norm(y,p_average_CDF_norm,vector_log2_exp))
+         })
+      
+      layout(mat=matrix(c(1:12), nrow = 3, ncol = 4))
+      
+      
+      #for (i in c(619,438,558,231)){
+        
+        #plot(vector_log2_exp,likelihood_sample[,i], ylab=paste('log p(x),','gene',as.character(i)),
+         #    xlab='log2(expression)',main='')
+        
+        
+       #plot(density(samples_px[,i], bw='SJ', from=-5, to=20), 
+        #     ylab=paste('Density, gene',as.character(i)),
+        #     xlab='log2(expression)',main='') 
+        
+        #plot(density(normalized_samples[i,], bw='SJ', from=0, to=1), 
+        #     ylab=paste('Density, gene',as.character(i)),
+        #     xlab='QN expression',main='') }
+      
+      #mtext(paste(file,experiment_id[id_biosample]), side = 3, line = -3, outer = TRUE)
+      
+      print('DONE')
+      
+      array_samples <- abind(array_samples,normalized_samples,along=3)
+      
+      
+      }
+      return(array_samples)
+      
+      }
+```
+
+
+```{r Extract file names, echo=FALSE}
+extract_file_names <- function(drugs){
+  ##Metadata
+  metadata_sample <- file.path('data','GEO','GSE70138','GSE70138_Broad_LINCS_inst_info_2017-03-06.txt') %>% 
+    read.table(sep="\t", header=TRUE, quote='#')%>%
+    mutate(inst_id = gsub(":", ".", inst_id)) 
+  
+  
+  ##Obtain sample ID only for the 6 drugs of interested  (it's taking DMSO of plates we are not interested, but as only .h5 file of the plates that we are interested have been unzipped it's ok)
+  
+  instid_6drugs <- metadata_sample %>% filter(pert_iname %in% drugs )  %>%
+    .[['inst_id']] %>%  gsub("\\.", "_",.)
+  
+  return(instid_6drugs)
+}
+
+experiment_name <- function(id_samples){
+  ##Metadata
+  
+  metadata_sample <- file.path('data','GEO','GSE70138','GSE70138_Broad_LINCS_inst_info_2017-03-06.txt') %>% 
+    read.table(sep="\t", header=TRUE, quote='#')%>%
+    mutate(inst_id = gsub(":", "_", inst_id))  %>%
+    filter(inst_id %in% id_samples)
+
+  
+  
+  ##Obtain sample ID only for the 6 drugs of interested  (it's taking DMSO of plates we are not interested, but as only .h5 file of the plates that we are interested have been unzipped it's ok)
+  instid_6drugs <- metadata_sample %>% 
+                    mutate(experiment_id=paste(cell_id,pert_iname,pert_dose,pert_time,sep='_'))  %>%
+                    .[['experiment_id']]
+  
+}
+```
+
+##Main function
+
+```{r Main function, echo=FALSE}
+
+main_function <- function(){
+  t_path <- file.path('data','L1000_bayesian','Bayesian_GSE70138_Level3_test')
+  
+  
+  #Do for each h5 file found in the folder
+  h5files_path <- file.path('data','L1000_bayesian','Bayesian_GSE70138_Level2_DPEAK')
+  all_files <- list.files(h5files_path)
+  h5_files <- grep(".*h5", all_files, value=T)
+  
+  #Extract metadata
+  drugs <- c('lapatinib','dacomitinib','afatinib','trametinib','selumetinib','PD-0325901','DMSO')
+  null_drugs <- c('CGP-60474','palbociclib','paclitaxel','docetaxel','irinotecan','altermine')
+  null_drug <- c('mitoxantrone')
+  instid_6drugs <- extract_file_names(drugs)
+  
+  
+  for (file in (h5_files)){
+            print(file)
+  
+            array_samples <- paste(substr(file,1,nchar(file)-3),'array_QN',sep='_')
+            all_files_output <- list.files(ouput_path)
+            
+            start_time = Sys.time() #########Time code
+  
+  ################ READ DATA .h5 FILES##########################################
+  ##Select only the biological samples of interest from the -h5 file
+  
+  index_samples <- file.path(h5files_path,file) %>% h5read('rowid') %in% instid_6drugs %>%
+    which(TRUE)
+  
+  if (identical(index_samples, integer(0))){
+              print('Not right h5 file')
+              H5close()}
+  else{
+    
+      null_drugs <- c('CGP-60474','palbociclib','paclitaxel','docetaxel','irinotecan','altermine','DMSO') #Add dmso
+      null_drugs <- c('mitoxantrone','DMSO')
+      instid_6drugs <- extract_file_names(null_drugs)
+      
+      index_samples <- file.path(h5files_path,file) %>% h5read('rowid') %in% instid_6drugs %>%
+       which(TRUE)
+      
+      id_samples <- file.path(h5files_path,file) %>% h5read('rowid') %>%
+                      .[index_samples]
+  
+  
+  
+      index_matrix <- list(NULL, NULL ,index_samples)
+  
+      loglikelihood <- file.path(h5files_path,file)  %>% h5read('data',index = index_matrix)
+  
+
+      log2_exp <- file.path(h5files_path,file) %>%  h5read('peakloc')
+  
+      H5close()
+  
+  
+  #############################################################################
+  
+  ################ Obtain QN sample, define n samples ##########################
+  assign(array_samples, loglikelihood_sample(loglikelihood,log2_exp,100,id_samples,file))
+  
+  print('DONE----')
+  ##############################################################################
+  
+  
+  ################Save it in a .h5 file########################################
+  
+  directory_h5_file <- file.path(ouput_path,paste('null_mito_drugs_',array_samples,'.h5',sep=''))
+  
+  h5createFile(directory_h5_file)
+  h5write(get(array_samples), file = directory_h5_file, name='data')
+  h5write(id_samples, file = directory_h5_file, name='rowid')
+  
+  h5ls(directory_h5_file)
+  H5close()
+  #############################################################################
+  
+  
+  
+  print("Time to run plate:")
+  print(Sys.time() - start_time)############Time code
+  }
+  
+  
+    },error=function(file){print('Problematic file')
+  
+      write(as.character(file),file="problematicfiles.txt",append=TRUE)})}}}
+
+main_function()
+
+```
+
